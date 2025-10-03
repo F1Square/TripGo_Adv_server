@@ -380,11 +380,54 @@ const addRoutePoint = async (req, res) => {
   }
 };
 
+// @desc    Bulk add route points to active trip
+// @route   POST /api/trips/active/route/bulk
+// @access  Private
+const addRoutePointsBulk = async (req, res) => {
+  try {
+    const { points } = req.body;
+    if (!Array.isArray(points) || !points.length) {
+      return res.status(400).json({ success: false, error: 'Provide non-empty points array' });
+    }
+
+    const trip = await Trip.findActiveTrip(req.user.id);
+    if (!trip) {
+      return res.status(404).json({ success: false, error: 'No active trip found' });
+    }
+
+    const sanitized = [];
+    for (const p of points) {
+      if (p && typeof p.latitude === 'number' && typeof p.longitude === 'number' && typeof p.accuracy === 'number' && typeof p.timestamp === 'number') {
+        sanitized.push({
+          latitude: p.latitude,
+            longitude: p.longitude,
+            accuracy: p.accuracy,
+            timestamp: p.timestamp
+        });
+      }
+    }
+
+    if (!sanitized.length) {
+      return res.status(400).json({ success: false, error: 'No valid points provided' });
+    }
+
+    // Append and save
+    trip.route.push(...sanitized);
+    await trip.save();
+
+    res.status(200).json({ success: true, data: trip, added: sanitized.length });
+  } catch (error) {
+    console.error('Bulk add route points error:', error);
+    res.status(500).json({ success: false, error: 'Server error while adding route points' });
+  }
+};
+
 // Routes
 router.get('/', getTrips);
 router.get('/active', getActiveTrip);
 router.post('/', createTrip);
 router.post('/active/route', addRoutePoint);
+router.post('/active/route/bulk', addRoutePointsBulk);
 router.get('/:id', getTrip);
 router.put('/:id', updateTrip);
 router.put('/:id/end', endTrip);
