@@ -13,26 +13,33 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 // CORS middleware
+// Allow any origin by default to simplify cross-domain calls between
+// separately deployed frontend and backend on Vercel. You can replace
+// this with a whitelist using process.env.FRONTEND_URL later.
 app.use(cors({
-  origin: [
-    'http://localhost:8080',
-    'http://localhost:8081',
-    'http://localhost:5173',
-    process.env.FRONTEND_URL
-  ].filter(Boolean),
-  credentials: true,
+  origin: '*',
+  credentials: false,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
-// Connect to MongoDB
+// Connect to MongoDB (optimized for serverless)
+let isDbConnected = false;
 const connectDB = async () => {
+  if (isDbConnected) return;
+
+  if (!process.env.MONGODB_URI) {
+    console.error('Missing MONGODB_URI environment variable');
+    return; // Avoid crashing the serverless function; surface errors via routes
+  }
+
   try {
     const conn = await mongoose.connect(process.env.MONGODB_URI);
+    isDbConnected = !!conn?.connection?.readyState;
     console.log(`MongoDB Connected: ${conn.connection.host}`);
   } catch (error) {
-    console.error('Database connection error:', error);
-    process.exit(1);
+    console.error('Database connection error:', error?.message || error);
+    // Do not exit in serverless environment; requests will return 500s until fixed
   }
 };
 
@@ -88,10 +95,18 @@ app.use((req, res) => {
   });
 });
 
-const PORT = process.env.PORT || 3000;
+// Export a serverless handler for Vercel and start a server only in
+// traditional environments (local/dev or when explicitly run as a server).
+const isServerless = !!process.env.VERCEL;
 
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`🌐 API endpoints available at http://localhost:${PORT}/api`);
-});
+if (isServerless) {
+  // Export the Express app directly; Vercel's Node runtime can invoke it
+  module.exports = app;
+} else {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
+    console.log(`🌐 API endpoints available at http://localhost:${PORT}/api`);
+  });
+}
