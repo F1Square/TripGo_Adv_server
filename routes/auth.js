@@ -9,10 +9,33 @@ const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 const router = express.Router();
 
-// Generate JWT Token
+// Helper: seconds until next 1:00 AM for a given timezone offset (minutes)
+// Use env var JWT_TZ_OFFSET_MINUTES (e.g., 330 for IST) – defaults to UTC (0)
+const getSecondsUntilNext1AM = () => {
+  const offsetMin = parseInt(process.env.JWT_TZ_OFFSET_MINUTES || '0', 10) || 0;
+
+  // Current UTC time
+  const nowUtc = new Date();
+  // Convert to target timezone by applying offset minutes
+  const nowTz = new Date(nowUtc.getTime() + offsetMin * 60 * 1000);
+
+  // Compute next 1:00 AM in target timezone
+  const next1amTz = new Date(nowTz);
+  next1amTz.setHours(1, 0, 0, 0);
+  if (next1amTz <= nowTz) {
+    next1amTz.setDate(next1amTz.getDate() + 1);
+  }
+
+  const diffMs = next1amTz.getTime() - nowTz.getTime();
+  // Convert back to seconds; ensure a minimum validity window (e.g., 5 minutes)
+  return Math.max(300, Math.floor(diffMs / 1000));
+};
+
+// Generate JWT Token that expires at next 1 AM of configured timezone
 const generateToken = (id) => {
+  const expiresInSeconds = getSecondsUntilNext1AM();
   return jwt.sign({ id }, process.env.JWT_SECRET, {
-    expiresIn: '30d'
+    expiresIn: expiresInSeconds
   });
 };
 
