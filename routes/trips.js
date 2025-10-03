@@ -1,5 +1,7 @@
 const express = require('express');
 const Trip = require('../models/Trip');
+const UserData = require('../models/UserData');
+const { reverseGeocode } = require('../utils/reverseGeocode');
 const { protect } = require('../middleware/auth');
 
 const router = express.Router();
@@ -101,13 +103,25 @@ const createTrip = async (req, res) => {
       });
     }
 
+    // Attempt reverse geocoding for starting point if route provided
+    let startLocationName = undefined;
+    try {
+      const firstPoint = (route && route.length > 0) ? route[0] : null;
+      if (firstPoint && typeof firstPoint.latitude === 'number' && typeof firstPoint.longitude === 'number') {
+        startLocationName = await reverseGeocode(firstPoint.latitude, firstPoint.longitude);
+      }
+    } catch (geoErr) {
+      console.warn('Reverse geocode start failed:', geoErr?.message || geoErr);
+    }
+
     // Create trip
     const trip = await Trip.create({
       userId: req.user.id,
       purpose: purpose.trim(),
       startOdometer: Number(startOdometer),
       route: route || [],
-      status: 'active'
+      status: 'active',
+      startLocation: startLocationName
     });
 
     res.status(201).json({
@@ -186,13 +200,6 @@ const endTrip = async (req, res) => {
   try {
     const { endOdometer, endLocation } = req.body;
 
-    if (!endOdometer) {
-      return res.status(400).json({
-        success: false,
-        error: 'Please provide end odometer reading'
-      });
-    }
-
     let trip = await Trip.findOne({ 
       _id: req.params.id, 
       userId: req.user.id,
@@ -206,23 +213,53 @@ const endTrip = async (req, res) => {
       });
     }
 
-    // Validate end odometer
-    if (Number(endOdometer) < trip.startOdometer) {
-      return res.status(400).json({
-        success: false,
-        error: 'End odometer reading must be greater than or equal to start reading'
-      });
-    }
+    // Compute final odometer using integer distance rule: round up only if fractional part > 0.5
+    const roundDistance = (d) => {
+      const base = Math.floor(Number(d) || 0);
+      const frac = (Number(d) || 0) - base;
+      return base + (frac > 0.5 ? 1 : 0);
+    };
+    // Prefer server-calculated distance on the trip if available
+    const roundedDistance = roundDistance(trip.distance || 0);
+    const computedEndOdo = trip.startOdometer + roundedDistance;
+
+    // If client provided a value, use the computed one to guarantee consistency
+    const finalEndOdometer = Math.max(computedEndOdo, trip.startOdometer);
 
     // Update trip
     trip.endTime = new Date();
-    trip.endOdometer = Number(endOdometer);
+    trip.endOdometer = finalEndOdometer;
     trip.status = 'completed';
     if (endLocation) {
       trip.endLocation = endLocation;
+    } else {
+      // Try to reverse geocode last route point for end location
+      try {
+        const lastPoint = trip.route && trip.route.length > 0 ? trip.route[trip.route.length - 1] : null;
+        if (lastPoint) {
+          const endLocName = await reverseGeocode(lastPoint.latitude, lastPoint.longitude);
+          if (endLocName) trip.endLocation = endLocName;
+        }
+      } catch (geoErr) {
+        console.warn('Reverse geocode end failed:', geoErr?.message || geoErr);
+      }
     }
 
     await trip.save();
+
+    // Update user's current odometer and clear active trip
+    try {
+      await UserData.findOneAndUpdate(
+        { userId: req.user.id },
+        {
+          $inc: { currentOdometer: roundedDistance },
+          $set: { activeTrip: null, updatedAt: new Date() }
+        },
+        { new: true, upsert: true }
+      );
+    } catch (e) {
+      console.warn('Failed to update user currentOdometer:', e?.message || e);
+    }
 
     res.status(200).json({
       success: true,
