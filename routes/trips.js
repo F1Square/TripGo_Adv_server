@@ -124,6 +124,20 @@ const createTrip = async (req, res) => {
       startLocation: startLocationName
     });
 
+    // Update UserData: mark active trip and ensure currentOdometer baseline is at least startOdometer
+    try {
+      await UserData.findOneAndUpdate(
+        { userId: req.user.id },
+        {
+          $set: { activeTrip: trip._id, updatedAt: new Date() },
+          $max: { currentOdometer: Number(startOdometer) }
+        },
+        { new: true, upsert: true }
+      );
+    } catch (e) {
+      console.warn('Failed to set activeTrip / baseline odometer:', e?.message || e);
+    }
+
     res.status(201).json({
       success: true,
       data: trip
@@ -356,6 +370,16 @@ const addRoutePoint = async (req, res) => {
       });
     }
 
+    // Defensive: ensure userData reflects this active trip if missing (e.g., legacy data)
+    try {
+      await UserData.findOneAndUpdate(
+        { userId: req.user.id, activeTrip: { $ne: trip._id } },
+        { $set: { activeTrip: trip._id, updatedAt: new Date() } }
+      );
+    } catch (e) {
+      console.warn('Failed to sync activeTrip in userData (single point):', e?.message || e);
+    }
+
     // Add new point to route
     const newPoint = {
       latitude: Number(latitude),
@@ -366,6 +390,22 @@ const addRoutePoint = async (req, res) => {
 
     trip.route.push(newPoint);
     await trip.save();
+
+    // Optionally keep a live estimated odometer: startOdometer + rounded distance so far
+    try {
+      const roundDistance = (d) => {
+        const base = Math.floor(Number(d) || 0);
+        const frac = (Number(d) || 0) - base;
+        return base + (frac > 0.5 ? 1 : 0);
+      };
+      const estDistance = roundDistance(trip.distance || 0);
+      await UserData.findOneAndUpdate(
+        { userId: req.user.id },
+        { $set: { currentOdometer: trip.startOdometer + estDistance, updatedAt: new Date() } }
+      );
+    } catch (e) {
+      console.warn('Failed to update live odometer (single point):', e?.message || e);
+    }
 
     res.status(200).json({
       success: true,
@@ -395,6 +435,16 @@ const addRoutePointsBulk = async (req, res) => {
       return res.status(404).json({ success: false, error: 'No active trip found' });
     }
 
+    // Defensive: ensure activeTrip is set in userData
+    try {
+      await UserData.findOneAndUpdate(
+        { userId: req.user.id, activeTrip: { $ne: trip._id } },
+        { $set: { activeTrip: trip._id, updatedAt: new Date() } }
+      );
+    } catch (e) {
+      console.warn('Failed to sync activeTrip in userData (bulk):', e?.message || e);
+    }
+
     const sanitized = [];
     for (const p of points) {
       if (p && typeof p.latitude === 'number' && typeof p.longitude === 'number' && typeof p.accuracy === 'number' && typeof p.timestamp === 'number') {
@@ -414,6 +464,21 @@ const addRoutePointsBulk = async (req, res) => {
     // Append and save
     trip.route.push(...sanitized);
     await trip.save();
+
+    try {
+      const roundDistance = (d) => {
+        const base = Math.floor(Number(d) || 0);
+        const frac = (Number(d) || 0) - base;
+        return base + (frac > 0.5 ? 1 : 0);
+      };
+      const estDistance = roundDistance(trip.distance || 0);
+      await UserData.findOneAndUpdate(
+        { userId: req.user.id },
+        { $set: { currentOdometer: trip.startOdometer + estDistance, updatedAt: new Date() } }
+      );
+    } catch (e) {
+      console.warn('Failed to update live odometer (bulk):', e?.message || e);
+    }
 
     res.status(200).json({ success: true, data: trip, added: sanitized.length });
   } catch (error) {
